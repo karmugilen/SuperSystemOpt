@@ -1,0 +1,414 @@
+{
+  "project_metadata": {
+    "name": "ILWT-Based Deep Learning Image Steganography",
+    "version": "1.0",
+    "type": "Deep Learning Research Project",
+    "domain": "Computer Vision, Steganography, Information Hiding",
+    "framework": "PyTorch",
+    "last_updated": "2025-11-01"
+  },
+
+  "project_description": {
+    "summary": "Invertible neural network for hiding complete images inside cover images using Integer Lifting Wavelet Transform",
+    "key_concept": "Takes two images (cover + secret), combines them into one stego image that looks like the cover, then extracts the secret using only the stego image",
+    "main_innovation": "Frequency-domain steganography with ILWT + Normalizing Flows + YCbCr color space exploitation"
+  },
+
+  "core_workflow": {
+    "hiding_process": {
+      "input": ["cover_image (3 channels RGB)", "secret_image (3 channels RGB)"],
+      "steps": [
+        "Concatenate to 6 channels",
+        "Apply ILWT transform → frequency domain (24 channels, H/2×W/2)",
+        "Pass through StarINN blocks (conditioned on cover features)",
+        "Inverse ILWT → back to spatial domain",
+        "Add YCbCr residual (Y scale=0.01, CbCr scale=0.04)",
+        "Extract first 3 channels as stego image"
+      ],
+      "output": "stego_image (3 channels RGB) - visually identical to cover"
+    },
+    "extraction_process": {
+      "input": ["stego_image (3 channels RGB)", "zeros (3 channels padding)"],
+      "steps": [
+        "Concatenate to 6 channels",
+        "Apply ILWT transform → frequency domain",
+        "Reverse through StarINN blocks",
+        "Inverse ILWT → spatial domain",
+        "Subtract YCbCr residual",
+        "Extract channels 3:6 as recovered secret"
+      ],
+      "output": "recovered_secret_image (3 channels RGB)"
+    }
+  },
+
+  "architecture": {
+    "model_hierarchy": {
+      "StarINNWithILWT": {
+        "role": "Main steganography model",
+        "line_range": "400-505",
+        "components": [
+          "ilwt: ILWT53_2D or LearnableILWTWithHaar",
+          "cond_net: Lightweight CNN for cover feature extraction",
+          "blocks: ModuleList of StarINNBlock"
+        ],
+        "methods": {
+          "forward": "Embeds secret into cover → stego image",
+          "inverse": "Extracts secret from stego image"
+        }
+      },
+      "ILWT53_2D": {
+        "role": "Differentiable 2D Integer Lifting Wavelet Transform",
+        "line_range": "114-163",
+        "transform": "LeGall 5/3 lifting scheme",
+        "forward_transform": "(B,C,H,W) → (B,4C,H/2,W/2) [LL,LH,HL,HH subbands]",
+        "inverse_transform": "(B,4C,H/2,W/2) → (B,C,H,W) [perfect reconstruction]",
+        "differentiability": "Fully differentiable for backpropagation",
+        "reconstruction_error": "~1e-7 (nearly perfect)"
+      },
+      "StarINNBlock": {
+        "role": "Invertible transformation block",
+        "line_range": "374-396",
+        "components": [
+          "ActNorm: Activation normalization with learnable scale/bias",
+          "Invertible1x1Conv: Orthogonal channel mixing",
+          "AffineCouplingLayer: Conditional affine transformations"
+        ],
+        "properties": "Invertible, flow-based, conditional on cover features"
+      },
+      "AffineCouplingLayer": {
+        "role": "Core transformation with conditional processing",
+        "line_range": "291-342",
+        "mechanism": "Split channels, use one half to predict scale/shift for other half",
+        "conditioning": "Takes cover image features as additional input",
+        "gating": "Gated residual connection for stable training"
+      }
+    },
+    "auxiliary_components": {
+      "ActNorm": "Activation normalization (lines 264-287)",
+      "Invertible1x1Conv": "Learnable orthogonal mixing (lines 346-370)",
+      "LearnableILWTWithHaar": "Alternative learnable wavelet (lines 190-260)",
+      "rgb_to_ycbcr": "RGB to YCbCr conversion (lines 167-175)",
+      "ycbcr_to_rgb": "YCbCr to RGB conversion (lines 178-186)"
+    }
+  },
+
+  "training_configuration": {
+    "dataset": {
+      "class": "ImageSteganographyDataset",
+      "line_range": "509-548",
+      "location": "my_images/",
+      "supported_formats": ["png", "jpg", "jpeg"],
+      "split_ratio": {
+        "train": 0.7,
+        "validation": 0.15,
+        "test": 0.15
+      },
+      "preprocessing": [
+        "Resize to 224×224",
+        "Convert to tensor",
+        "Normalize to [-1, 1] range"
+      ]
+    },
+    "hyperparameters": {
+      "img_size": 224,
+      "batch_size": 1,
+      "learning_rate": "2e-5",
+      "num_epochs": 3,
+      "num_blocks": 6,
+      "hidden_channels": 96,
+      "optimizer": "Adam with weight_decay=1e-5",
+      "scheduler": "CosineAnnealingLR"
+    },
+    "loss_function": {
+      "components": [
+        {
+          "name": "hiding_loss",
+          "weight": "alpha_hid (4.0 → 48.0 curriculum)",
+          "purpose": "Stego image invisibility (MSE with cover)"
+        },
+        {
+          "name": "recovery_mse",
+          "weight": "alpha_rec_mse (1.0)",
+          "purpose": "Secret reconstruction accuracy"
+        },
+        {
+          "name": "recovery_ssim",
+          "weight": "alpha_rec_ssim (2.0)",
+          "purpose": "Perceptual quality of recovered secret"
+        },
+        {
+          "name": "gradient_loss",
+          "weight": "lambda_grad (0.07)",
+          "purpose": "Edge preservation"
+        },
+        {
+          "name": "total_variation",
+          "weight": "lambda_tv (0.0075)",
+          "purpose": "Smoothness"
+        },
+        {
+          "name": "multiscale_ilwt_loss",
+          "weight": "1.0",
+          "purpose": "Wavelet structure preservation (2 levels)"
+        }
+      ],
+      "line_range": "751-820"
+    },
+    "curriculum_learning": {
+      "alpha_hid_schedule": "Ramps from 4.0 to 48.0 over 70% of epochs",
+      "perturbations": "Gradually enabled (quantization + noise) to simulate real-world conditions"
+    }
+  },
+
+  "metrics_and_evaluation": {
+    "hiding_quality_metrics": {
+      "PSNR": {
+        "full_name": "Peak Signal-to-Noise Ratio",
+        "range": "0-100 dB",
+        "good_value": ">35 dB (imperceptible), >40 dB (excellent)",
+        "measures": "Stego image vs cover image similarity",
+        "line_range": "591-597"
+      },
+      "SSIM": {
+        "full_name": "Structural Similarity Index",
+        "range": "0-1",
+        "good_value": ">0.95",
+        "measures": "Perceptual similarity",
+        "line_range": "600-661"
+      },
+      "MSE": {
+        "full_name": "Mean Squared Error",
+        "range": "0-inf",
+        "good_value": "Lower is better",
+        "measures": "Pixel-level distortion"
+      },
+      "HR": {
+        "full_name": "Hiding Ratio",
+        "range": "0-1",
+        "good_value": "Higher is better",
+        "measures": "Visual similarity",
+        "line_range": "704-710"
+      },
+      "BIR": {
+        "full_name": "Bitrate Increase Ratio",
+        "range": "0-inf",
+        "good_value": "Lower is better",
+        "measures": "Complexity change",
+        "line_range": "713-721"
+      }
+    },
+    "recovery_quality_metrics": {
+      "Recovery_PSNR": {
+        "typical_value": "15-25 dB",
+        "interpretation": "Secret reconstruction quality",
+        "measures": "Recovered secret vs original secret"
+      },
+      "Recovery_SSIM": {
+        "typical_value": "0.90-0.95",
+        "interpretation": "Perceptual quality of recovery",
+        "measures": "Structural similarity of recovered secret"
+      },
+      "ACC": {
+        "full_name": "Bit Accuracy",
+        "range": "0-1",
+        "good_value": ">0.95",
+        "measures": "Bit-level correctness",
+        "line_range": "664-693"
+      },
+      "BER": {
+        "full_name": "Bit Error Rate",
+        "range": "0-1",
+        "good_value": "<0.05",
+        "formula": "1 - ACC",
+        "measures": "Bit-level error rate",
+        "line_range": "696-701"
+      }
+    },
+    "capacity_metrics": {
+      "BPP": {
+        "full_name": "Bits Per Pixel",
+        "value": 24,
+        "interpretation": "Full RGB capacity (8 bits × 3 channels)",
+        "meaning": "Can hide entire RGB image"
+      }
+    }
+  },
+
+  "file_structure": {
+    "main_training_script": {
+      "file": "dwt_vs_ilwt_comparison_224.py",
+      "lines": 1569,
+      "purpose": "Complete training, testing, and evaluation pipeline",
+      "entry_point": "main() at line 1366",
+      "key_functions": {
+        "train_model": "lines 843-1149",
+        "test_model": "lines 1153-1362",
+        "generate_research_plots": "lines 1417-1564"
+      }
+    },
+    "embedding_scripts": {
+      "embed_self_contained.py": "Standalone embedding (no model loading)",
+      "embed.py": "Requires trained model weights"
+    },
+    "extraction_scripts": {
+      "extract_self_contained.py": "Standalone extraction (no model loading)",
+      "extract.py": "Requires trained model weights"
+    },
+    "evaluation_scripts": {
+      "evaluate_metrics.py": "Stego image quality evaluation",
+      "evaluate_secret_metrics.py": "Secret recovery quality evaluation",
+      "research_evaluation.py": "Comprehensive research metrics"
+    },
+    "output_directories": {
+      "research_metrics/": "Training metrics (JSON + logs)",
+      "research_plots/": "Training visualization plots",
+      "ilwt_test_results/": "Test sample visualizations",
+      "my_images/": "Training dataset"
+    },
+    "model_weights": {
+      "ilwt_steganography_model.pth": "Original trained model",
+      "ilwt_steganography_model_research.pth": "Research version"
+    }
+  },
+
+  "key_design_decisions": {
+    "frequency_domain_embedding": {
+      "why": "Better capacity-quality tradeoff than spatial domain",
+      "implementation": "ILWT (LeGall 5/3) transform before INN blocks"
+    },
+    "ycbcr_color_space": {
+      "why": "Human vision less sensitive to chrominance (Cb/Cr) changes",
+      "implementation": "Y channel scaled by 0.01, CbCr by 0.04",
+      "advantage": "Can embed more in chrominance without detection"
+    },
+    "conditional_on_cover": {
+      "why": "Adapt hiding strategy per image content",
+      "implementation": "Lightweight CNN extracts cover features → condition INN blocks",
+      "benefit": "Better hiding in textured regions, careful in smooth regions"
+    },
+    "invertible_architecture": {
+      "why": "Theoretical perfect reconstruction",
+      "implementation": "Normalizing flows (ActNorm + 1x1Conv + Coupling)",
+      "property": "No information loss during forward/inverse"
+    },
+    "multi_scale_wavelet_loss": {
+      "why": "Preserve structure at multiple resolutions",
+      "implementation": "Level-1 (LL/LH/HL/HH) + Level-2 (LL-of-LL)",
+      "priority": "LL subband (structure) > LH/HL (edges) > HH (noise)"
+    },
+    "perturbation_augmentation": {
+      "why": "Robustness to JPEG compression and file I/O",
+      "implementation": "Curriculum-based quantization + Gaussian noise",
+      "timing": "Gradually enabled during training"
+    }
+  },
+
+  "known_issues_and_limitations": {
+    "padding_storage_bug": {
+      "location": "ILWT53_2D class (lines 124-163)",
+      "issue": "Instance variable stores padding info, not thread-safe",
+      "impact": "Only works reliably with batch_size=1",
+      "workaround": "Current code uses batch_size=1",
+      "fix": "Return padding_info from forward(), pass to inverse()"
+    },
+    "fixed_resolution": {
+      "current": "224×224 pixels",
+      "limitation": "Model trained for specific size",
+      "workaround": "Retrain for different sizes"
+    },
+    "compression_sensitivity": {
+      "issue": "JPEG compression degrades recovery quality",
+      "mitigation": "Perturbation augmentation during training",
+      "recommendation": "Use PNG for stego images"
+    },
+    "model_dependency": {
+      "issue": "Both sender and receiver need identical trained model",
+      "implication": "Not suitable for public communication without key exchange"
+    }
+  },
+
+  "typical_results": {
+    "after_training": {
+      "hiding_psnr": "38-45 dB",
+      "hiding_ssim": "0.97-0.99",
+      "recovery_psnr": "15-25 dB",
+      "recovery_ssim": "0.90-0.95",
+      "bit_accuracy": "0.95-0.98",
+      "bit_error_rate": "0.02-0.05"
+    },
+    "interpretation": {
+      "stego_quality": "Visually indistinguishable from cover",
+      "recovery_quality": "Good perceptual quality, most bits correct",
+      "capacity": "Full RGB image (224×224×3 = 150,528 bytes)"
+    }
+  },
+
+  "usage_guide": {
+    "quick_start": {
+      "1_train": "python dwt_vs_ilwt_comparison_224.py",
+      "2_embed": "python embed.py (needs cover.png + hide.png)",
+      "3_extract": "python extract.py (needs embedded_output.png)",
+      "4_evaluate": "python evaluate_metrics.py"
+    },
+    "configuration_editing": {
+      "file": "dwt_vs_ilwt_comparison_224.py",
+      "function": "main() at line 1366",
+      "parameters": {
+        "img_size": "Image resolution (default: 224)",
+        "num_epochs": "Training iterations (default: 3, increase for production)",
+        "num_blocks": "INN block count (default: 6)",
+        "hidden_channels": "Network width (default: 96)",
+        "batch_size": "Training batch size (default: 1)"
+      }
+    }
+  },
+
+  "research_applications": {
+    "secure_communication": "Covert messaging without detection",
+    "copyright_protection": "Invisible watermarking",
+    "dual_purpose_images": "One image serves two purposes",
+    "adversarial_testing": "Benchmark for steganalysis algorithms"
+  },
+
+  "dependencies": {
+    "required_packages": [
+      "torch (PyTorch)",
+      "torchvision",
+      "numpy",
+      "matplotlib",
+      "pillow (PIL)",
+      "tqdm"
+    ],
+    "python_version": "3.7+",
+    "cuda": "Optional but recommended for training"
+  },
+
+  "code_locations": {
+    "ilwt_forward": "lines 37-55",
+    "ilwt_inverse": "lines 58-80",
+    "ilwt_2d_class": "lines 114-163",
+    "starinn_block": "lines 374-396",
+    "main_model": "lines 400-505",
+    "loss_function": "lines 751-791",
+    "multiscale_loss": "lines 794-820",
+    "training_loop": "lines 843-1149",
+    "testing_loop": "lines 1153-1362",
+    "dataset_class": "lines 509-548",
+    "metrics": "lines 591-749"
+  },
+
+  "ai_understanding_notes": {
+    "model_type": "Invertible Neural Network (INN) / Normalizing Flow",
+    "problem_solved": "High-capacity image steganography",
+    "key_insight": "Frequency domain + invertible transforms = high capacity + high quality",
+    "novelty": "ILWT integration with conditional normalizing flows + YCbCr exploitation",
+    "state_of_art": "Research-grade implementation with comprehensive metrics",
+    "production_readiness": "Proof-of-concept, needs more training epochs and robustness testing",
+    "debugging_tips": [
+      "Check ILWT perfect reconstruction: error should be ~1e-7",
+      "Monitor hiding PSNR: should increase during training",
+      "Watch for NaN losses: indicates numerical instability",
+      "Validate with batch_size=1 first due to padding bug"
+    ]
+  }
+}

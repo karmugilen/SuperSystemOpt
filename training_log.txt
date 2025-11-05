@@ -1,0 +1,54 @@
+ILWT Steganography Training and Testing
+==================================================
+Loaded 100 images
+
+Training ILWT Steganography Model (with enhanced metrics)...
+Using device: cuda
+Model parameters: 335,048
+Epoch 1/10, Loss: 1.772009, Hiding PSNR: 39.68, Recovery PSNR: 12.33, Rec SSIM: 0.2895, ACC: 0.5816, BPP: 24.00, alpha_hid: 4.00
+Epoch 2/10, Loss: 2.324985, Hiding PSNR: 38.32, Recovery PSNR: 8.73, Rec SSIM: 0.2078, ACC: 0.5197, BPP: 24.00, alpha_hid: 10.29
+Epoch 3/10, Loss: 2.331390, Hiding PSNR: 38.02, Recovery PSNR: 8.45, Rec SSIM: 0.2260, ACC: 0.5160, BPP: 24.00, alpha_hid: 16.57
+Epoch 4/10, Loss: 1.453978, Hiding PSNR: 38.25, Recovery PSNR: 12.31, Rec SSIM: 0.4531, ACC: 0.5923, BPP: 24.00, alpha_hid: 22.86
+Epoch 5/10, Loss: 1.567546, Hiding PSNR: 38.19, Recovery PSNR: 14.74, Rec SSIM: 0.3400, ACC: 0.6090, BPP: 24.00, alpha_hid: 29.14
+Epoch 6/10, Loss: 1.370406, Hiding PSNR: 38.02, Recovery PSNR: 13.90, Rec SSIM: 0.4614, ACC: 0.6321, BPP: 24.00, alpha_hid: 35.43
+Epoch 7/10, Loss: 1.126741, Hiding PSNR: 38.33, Recovery PSNR: 18.83, Rec SSIM: 0.5067, ACC: 0.6475, BPP: 24.00, alpha_hid: 41.71
+Epoch 8/10, Loss: 2.208592, Hiding PSNR: 40.65, Recovery PSNR: 10.22, Rec SSIM: 0.1802, ACC: 0.4935, BPP: 24.00, alpha_hid: 48.00
+Epoch 9/10, Loss: 1.435716, Hiding PSNR: 37.61, Recovery PSNR: 11.94, Rec SSIM: 0.4909, ACC: 0.6509, BPP: 24.00, alpha_hid: 48.00
+Epoch 10/10, Loss: 1.189229, Hiding PSNR: 38.22, Recovery PSNR: 18.05, Rec SSIM: 0.4875, ACC: 0.6525, BPP: 24.00, alpha_hid: 48.00
+Training metrics saved to research_metrics/training_metrics.json
+Training completed!
+
+Model saved as 'ilwt_steganography_model.pth'
+
+Testing model on 10 samples...
+Sample 1: Hiding PSNR=38.50 dB, Recovery PSNR=17.65 dB, Hiding SSIM=0.9223, Recovery SSIM=0.4933, ACC=0.6495, BPP=24.00
+Sample 2: Hiding PSNR=38.28 dB, Recovery PSNR=14.68 dB, Hiding SSIM=0.8642, Recovery SSIM=0.4500, ACC=0.6463, BPP=24.00
+Sample 3: Hiding PSNR=38.88 dB, Recovery PSNR=18.30 dB, Hiding SSIM=0.8436, Recovery SSIM=0.6337, ACC=0.7151, BPP=24.00
+Sample 4: Hiding PSNR=38.15 dB, Recovery PSNR=13.17 dB, Hiding SSIM=0.8584, Recovery SSIM=0.2690, ACC=0.6078, BPP=24.00
+Sample 5: Hiding PSNR=37.87 dB, Recovery PSNR=13.80 dB, Hiding SSIM=0.8148, Recovery SSIM=0.4301, ACC=0.6261, BPP=24.00
+Sample 6: Hiding PSNR=38.02 dB, Recovery PSNR=16.13 dB, Hiding SSIM=0.9442, Recovery SSIM=0.5045, ACC=0.6350, BPP=24.00
+Sample 7: Hiding PSNR=38.33 dB, Recovery PSNR=19.30 dB, Hiding SSIM=0.9016, Recovery SSIM=0.4109, ACC=0.6431, BPP=24.00
+Sample 8: Hiding PSNR=37.93 dB, Recovery PSNR=15.34 dB, Hiding SSIM=0.8485, Recovery SSIM=0.3508, ACC=0.6294, BPP=24.00
+Sample 9: Hiding PSNR=37.72 dB, Recovery PSNR=17.79 dB, Hiding SSIM=0.9433, Recovery SSIM=0.4722, ACC=0.6586, BPP=24.00
+Sample 10: Hiding PSNR=37.97 dB, Recovery PSNR=14.64 dB, Hiding SSIM=0.9030, Recovery SSIM=0.4321, ACC=0.6656, BPP=24.00
+
+======================================================================
+TESTING COMPLETED - SUMMARY STATISTICS
+======================================================================
+Average Hiding PSNR:           38.16 dB
+Average Recovery PSNR:         16.08 dB
+Average Hiding SSIM:           0.8844
+Average Recovery SSIM:         0.4447
+Average Bit Accuracy:          0.6477
+Average Hiding MSE:            0.000612
+Average Recovery MSE:          0.108904
+Average Extraction Success:    0.0000
+Bits Per Pixel (BPP):         24.00
+
+Test results saved in 'ilwt_test_results' directory
+Detailed test metrics saved to research_metrics/test_metrics.json
+======================================================================
+Research plots saved in research_plots/ directory
+
+
+python dwt_vs_ilwt_comparison_224.py > research_metrics/training_log_split.txt
