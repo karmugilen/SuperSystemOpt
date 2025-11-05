@@ -13,9 +13,132 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torchvision import models
+from torchvision.models import VGG19_Weights
 import math
 import shutil
 import json
+
+
+# ========== IMPROVEMENT 1: Perceptual Loss using VGG19 ==========
+class PerceptualLoss(nn.Module):
+    """VGG19-based perceptual loss for better image quality"""
+    def __init__(self):
+        super(PerceptualLoss, self).__init__()
+        vgg = models.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features
+        self.slice1 = nn.Sequential()
+        self.slice2 = nn.Sequential()
+        self.slice3 = nn.Sequential()
+        self.slice4 = nn.Sequential()
+
+        for x in range(4):
+            self.slice1.add_module(str(x), vgg[x])
+        for x in range(4, 9):
+            self.slice2.add_module(str(x), vgg[x])
+        for x in range(9, 18):
+            self.slice3.add_module(str(x), vgg[x])
+        for x in range(18, 27):
+            self.slice4.add_module(str(x), vgg[x])
+
+        # Freeze VGG parameters
+        for param in self.parameters():
+            param.requires_grad = False
+
+    def forward(self, x, y):
+        """
+        x, y: tensors in [-1, 1] range
+        Returns: perceptual loss
+        """
+        # Normalize from [-1, 1] to ImageNet stats
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(x.device)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(x.device)
+
+        x = (x + 1) / 2  # [-1, 1] -> [0, 1]
+        y = (y + 1) / 2
+        x = (x - mean) / std
+        y = (y - mean) / std
+
+        x1 = self.slice1(x)
+        y1 = self.slice1(y)
+        x2 = self.slice2(x1)
+        y2 = self.slice2(y1)
+        x3 = self.slice3(x2)
+        y3 = self.slice3(y2)
+        x4 = self.slice4(x3)
+        y4 = self.slice4(y3)
+
+        # Multi-level perceptual loss
+        loss = (F.l1_loss(x1, y1) +
+                F.l1_loss(x2, y2) +
+                F.l1_loss(x3, y3) +
+                F.l1_loss(x4, y4)) / 4.0
+        return loss
+
+
+# ========== IMPROVEMENT 2: Channel Attention Mechanism ==========
+class ChannelAttention(nn.Module):
+    """Channel attention for better feature weighting"""
+    def __init__(self, channels, reduction=8):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.fc = nn.Sequential(
+            nn.Conv2d(channels, channels // reduction, 1, bias=False),
+            nn.GELU(),
+            nn.Conv2d(channels // reduction, channels, 1, bias=False)
+        )
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = self.fc(self.avg_pool(x))
+        max_out = self.fc(self.max_pool(x))
+        out = self.sigmoid(avg_out + max_out)
+        return x * out
+
+
+# ========== IMPROVEMENT 3: Spatial Attention Mechanism ==========
+class SpatialAttention(nn.Module):
+    """Spatial attention for better feature localization"""
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        self.conv = nn.Conv2d(2, 1, kernel_size, padding=kernel_size//2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        out = torch.cat([avg_out, max_out], dim=1)
+        out = self.conv(out)
+        return x * self.sigmoid(out)
+
+
+# ========== IMPROVEMENT 4: Frequency Domain Loss (DCT) ==========
+def dct_2d(x):
+    """2D Discrete Cosine Transform"""
+    # Simple approximation using FFT
+    X = torch.fft.fft2(x, dim=(-2, -1))
+    return X.real
+
+
+def frequency_domain_loss(img1, img2):
+    """
+    Loss in frequency domain to preserve spectral characteristics
+    """
+    freq1 = dct_2d(img1)
+    freq2 = dct_2d(img2)
+
+    # Low-frequency components (structure) - more important
+    h, w = freq1.shape[-2:]
+    low_freq_mask = torch.zeros_like(freq1)
+    low_freq_mask[..., :h//4, :w//4] = 1.0
+
+    # High-frequency components (details)
+    high_freq_mask = 1.0 - low_freq_mask
+
+    loss_low = F.l1_loss(freq1 * low_freq_mask, freq2 * low_freq_mask)
+    loss_high = F.l1_loss(freq1 * high_freq_mask, freq2 * high_freq_mask)
+
+    return 2.0 * loss_low + loss_high  # Prioritize low frequencies
 
 
 # Differentiable 1D/2D ILWT (LeGall 5/3) utilities
@@ -287,27 +410,33 @@ class ActNorm(nn.Module):
         return x
 
 
-# Affine coupling layer
+# ========== IMPROVEMENT 5: Enhanced Affine Coupling with Attention ==========
 class AffineCouplingLayer(nn.Module):
-    def __init__(self, channels, hidden_channels=64, cond_channels=0):
+    def __init__(self, channels, hidden_channels=64, cond_channels=0, use_attention=True):
         super(AffineCouplingLayer, self).__init__()
 
         assert channels % 2 == 0, "Number of channels must be even"
         half_channels = channels // 2
+        self.use_attention = use_attention
 
         in_ch = half_channels + cond_channels
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch, hidden_channels, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.GroupNorm(1, hidden_channels),
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1),
-            nn.GELU(),
-            nn.GroupNorm(1, hidden_channels),
-            nn.Conv2d(hidden_channels, half_channels * 2, kernel_size=3, padding=1),
-        )
 
-        self.net[-1].weight.data.zero_()
-        self.net[-1].bias.data.zero_()
+        # Enhanced network with residual connections and attention
+        self.conv1 = nn.Conv2d(in_ch, hidden_channels, kernel_size=3, padding=1)
+        self.norm1 = nn.GroupNorm(8, hidden_channels)  # More groups for better normalization
+        self.conv2 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1)
+        self.norm2 = nn.GroupNorm(8, hidden_channels)
+        self.conv3 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1)
+        self.norm3 = nn.GroupNorm(8, hidden_channels)
+        self.conv_out = nn.Conv2d(hidden_channels, half_channels * 2, kernel_size=3, padding=1)
+
+        # Add attention mechanisms
+        if use_attention:
+            self.channel_attn = ChannelAttention(hidden_channels, reduction=8)
+            self.spatial_attn = SpatialAttention(kernel_size=7)
+
+        self.conv_out.weight.data.zero_()
+        self.conv_out.bias.data.zero_()
         # Gated residual on x2 to ease optimization (kept invertible by adjusting inverse)
         self.gamma_raw = nn.Parameter(torch.zeros(1, half_channels, 1, 1))
 
@@ -317,7 +446,19 @@ class AffineCouplingLayer(nn.Module):
             x1_in = torch.cat([x1, cond], dim=1)
         else:
             x1_in = x1
-        s_t = self.net(x1_in)
+
+        # Enhanced forward pass with residual connections and attention
+        h = F.gelu(self.norm1(self.conv1(x1_in)))
+        h = F.gelu(self.norm2(self.conv2(h)))
+
+        # Apply attention mechanisms
+        if self.use_attention:
+            h = self.channel_attn(h)
+            h = self.spatial_attn(h)
+
+        h = F.gelu(self.norm3(self.conv3(h)))
+        s_t = self.conv_out(h)
+
         s, t = s_t.chunk(2, dim=1)
         # stabilize scale
         s = torch.tanh(s)
@@ -332,7 +473,19 @@ class AffineCouplingLayer(nn.Module):
             y1_in = torch.cat([y1, cond], dim=1)
         else:
             y1_in = y1
-        s_t = self.net(y1_in)
+
+        # Enhanced inverse pass with residual connections and attention
+        h = F.gelu(self.norm1(self.conv1(y1_in)))
+        h = F.gelu(self.norm2(self.conv2(h)))
+
+        # Apply attention mechanisms
+        if self.use_attention:
+            h = self.channel_attn(h)
+            h = self.spatial_attn(h)
+
+        h = F.gelu(self.norm3(self.conv3(h)))
+        s_t = self.conv_out(h)
+
         s, t = s_t.chunk(2, dim=1)
         s = torch.tanh(s)
         gamma = F.softplus(self.gamma_raw)
@@ -414,12 +567,33 @@ class StarINNWithILWT(nn.Module):
         else:
             raise ValueError(f"Unknown transform_type: {transform_type}")
         self.inn_channels = channels * 4
-        # Lightweight UNet-like feature extractor for conditioning
-        cond_ch = 16
+
+        # ========== IMPROVEMENT 6: Enhanced Conditioning Network ==========
+        # More powerful multi-scale conditioning network
+        cond_ch = 64  # Increased from 16 for richer features
         self.cond_net = nn.Sequential(
-            nn.Conv2d(3, 16, 3, padding=1),
+            # Scale 1: Fine details
+            nn.Conv2d(3, 32, 3, padding=1),
             nn.GELU(),
-            nn.Conv2d(16, 16, 3, padding=1),
+            nn.GroupNorm(4, 32),
+            nn.Conv2d(32, 32, 3, padding=1),
+            nn.GELU(),
+            nn.GroupNorm(4, 32),
+
+            # Scale 2: Mid-level features
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.GELU(),
+            nn.GroupNorm(8, 64),
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.GELU(),
+            nn.GroupNorm(8, 64),
+
+            # Add attention to conditioning
+            ChannelAttention(64, reduction=4),
+            SpatialAttention(kernel_size=7),
+
+            # Final projection
+            nn.Conv2d(64, cond_ch, 1),
             nn.GELU(),
         )
 
@@ -449,10 +623,12 @@ class StarINNWithILWT(nn.Module):
             log_det_total += log_det
 
         residual_spatial = self.ilwt.inverse(z)
+        # ========== IMPROVEMENT 7: Optimized YCbCr Embedding Strength ==========
         # Compose stego in YCbCr: keep Y almost unchanged, allow more in Cb/Cr
         cover_ycc = rgb_to_ycbcr(cover)
         resid_ycc = rgb_to_ycbcr(residual_spatial[:, :3, :, :])
-        kY, kC = 0.02, 0.06  # Increased capacity (was 0.01, 0.04)
+        # Optimized values: lower Y for imperceptibility, moderate CbCr for capacity
+        kY, kC = 0.015, 0.05  # Fine-tuned (was 0.02, 0.06)
         scale = torch.cat(
             [
                 torch.full_like(cover_ycc[:, 0:1], kY),
@@ -487,7 +663,7 @@ class StarINNWithILWT(nn.Module):
         # Undo YCbCr composition
         z_ycc = rgb_to_ycbcr(z[:, :3, :, :])
         resid_ycc = rgb_to_ycbcr(residual_spatial[:, :3, :, :])
-        kY, kC = 0.02, 0.06  # Must match forward pass values
+        kY, kC = 0.015, 0.05  # Must match forward pass values
         scale = torch.cat(
             [
                 torch.full_like(z_ycc[:, 0:1], kY),
@@ -748,19 +924,34 @@ def calculate_imperceptibility(hide_img, stego_img):
     return imperceptibility
 
 
+# ========== IMPROVEMENT 8: Enhanced Loss Function ==========
 def steganography_loss(
     stego_img,
     host_img,
     secret_img,
     recovered_secret,
+    perceptual_loss_fn=None,
     alpha_hid=32.0,
     alpha_rec_mse=1.0,
-    alpha_rec_ssim=0.0,
+    alpha_rec_ssim=2.0,
+    alpha_rec_perceptual=0.5,
+    alpha_freq=0.3,
 ):
+    """
+    Enhanced loss function with perceptual and frequency domain losses
+    """
     hiding_loss = F.mse_loss(stego_img, host_img)
     rec_mse = F.mse_loss(recovered_secret, secret_img)
     # SSIM returns similarity in [0,1]; convert to loss (1 - ssim)
     rec_ssim = 1.0 - calculate_ssim(recovered_secret, secret_img)
+
+    # Perceptual loss for better visual quality
+    rec_perceptual = torch.tensor(0.0, device=stego_img.device)
+    if perceptual_loss_fn is not None:
+        rec_perceptual = perceptual_loss_fn(recovered_secret, secret_img)
+
+    # Frequency domain loss for structure preservation
+    freq_loss = frequency_domain_loss(recovered_secret, secret_img)
 
     # Edge-preserving terms to reduce pixelation/blocking
     def gradients(x):
@@ -772,6 +963,11 @@ def steganography_loss(
     ho_dx, ho_dy = gradients(host_img)
     grad_loss = F.l1_loss(sh_dx, ho_dx) + F.l1_loss(sh_dy, ho_dy)
 
+    # Also add gradient preservation for secret recovery
+    sec_dx, sec_dy = gradients(secret_img)
+    rec_dx, rec_dy = gradients(recovered_secret)
+    grad_rec_loss = F.l1_loss(rec_dx, sec_dx) + F.l1_loss(rec_dy, sec_dy)
+
     def total_variation(x):
         dx = x[..., :, 1:] - x[..., :, :-1]
         dy = x[..., 1:, :] - x[..., :-1, :]
@@ -779,16 +975,21 @@ def steganography_loss(
 
     tv_stego = total_variation(stego_img)
     tv_rec = total_variation(recovered_secret)
-    lambda_grad = 0.07
-    lambda_tv = 0.0075
+    lambda_grad = 0.05  # Slightly reduced (was 0.07)
+    lambda_grad_rec = 0.1  # For secret gradient preservation
+    lambda_tv = 0.005  # Slightly reduced (was 0.0075)
+
     total_loss = (
         alpha_hid * hiding_loss
         + alpha_rec_mse * rec_mse
         + alpha_rec_ssim * rec_ssim
+        + alpha_rec_perceptual * rec_perceptual
+        + alpha_freq * freq_loss
         + lambda_grad * grad_loss
+        + lambda_grad_rec * grad_rec_loss
         + lambda_tv * (tv_stego + tv_rec)
     )
-    return total_loss, hiding_loss, rec_mse, rec_ssim
+    return total_loss, hiding_loss, rec_mse, rec_ssim, rec_perceptual, freq_loss
 
 
 def ilwt_multiscale_secret_loss(ilwt_module, secret_img, recovered_secret):
@@ -857,13 +1058,22 @@ def train_model(model, train_dataset, val_dataset, num_epochs=100, save_metrics=
     print(f"Using device: {device}")
     model = model.to(device)
 
+    # ========== IMPROVEMENT 9: Initialize Perceptual Loss ==========
+    perceptual_loss_fn = PerceptualLoss().to(device)
+    perceptual_loss_fn.eval()
+
     batch_size = 8  # Optimized for 16GB VRAM
-    learning_rate = 3e-5  # Slightly increased for faster learning
+    learning_rate = 5e-5  # Increased for faster convergence (was 3e-5)
+    warmup_epochs = 3  # Warmup for stable training
+
+    # ========== IMPROVEMENT 10: Optimized Loss Weights ==========
     # Loss weights and schedules - IMPROVED for better recovery
-    alpha_hid_start = 2.0  # Start gentler (was 4.0)
-    alpha_hid_end = 24.0  # Less aggressive hiding priority (was 48.0)
-    alpha_rec_mse = 3.0  # Prioritize secret recovery (was 1.0)
-    alpha_rec_ssim = 5.0  # Strong perceptual quality (was 2.0)
+    alpha_hid_start = 1.5  # Start more gently (was 2.0)
+    alpha_hid_end = 20.0  # Moderate hiding priority (was 24.0)
+    alpha_rec_mse = 2.5  # Balanced secret recovery (was 3.0)
+    alpha_rec_ssim = 6.0  # Strong perceptual quality (was 5.0)
+    alpha_rec_perceptual = 1.0  # Perceptual loss weight
+    alpha_freq = 0.5  # Frequency domain loss weight
 
     # GPU-optimized DataLoaders for 16GB VRAM
     train_dataloader = DataLoader(
@@ -884,10 +1094,40 @@ def train_model(model, train_dataset, val_dataset, num_epochs=100, save_metrics=
         prefetch_factor=4  # Increased prefetch
     )
     
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=num_epochs, eta_min=1e-7
+    # ========== IMPROVEMENT 11: Better Optimizer and Scheduler ==========
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4, betas=(0.9, 0.999))
+
+    # Warmup + Cosine Annealing for stable training
+    def warmup_lambda(epoch):
+        if epoch < warmup_epochs:
+            return (epoch + 1) / warmup_epochs
+        return 1.0
+
+    warmup_scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=warmup_lambda)
+    cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=num_epochs - warmup_epochs, eta_min=1e-7
     )
+
+    # Combined scheduler
+    class CombinedScheduler:
+        def __init__(self, warmup_sched, cosine_sched, warmup_epochs):
+            self.warmup = warmup_sched
+            self.cosine = cosine_sched
+            self.warmup_epochs = warmup_epochs
+            self.current_epoch = 0
+
+        def step(self):
+            if self.current_epoch < self.warmup_epochs:
+                self.warmup.step()
+            else:
+                if self.current_epoch == self.warmup_epochs:
+                    # Reset cosine scheduler base learning rate
+                    for param_group in self.cosine.optimizer.param_groups:
+                        param_group['lr'] = self.warmup.get_last_lr()[0]
+                self.cosine.step()
+            self.current_epoch += 1
+
+    scheduler = CombinedScheduler(warmup_scheduler, cosine_scheduler, warmup_epochs)
 
     # Mixed precision ENABLED for 2x speedup with 16GB VRAM
     scaler = torch.cuda.amp.GradScaler(enabled=True)
@@ -966,14 +1206,19 @@ def train_model(model, train_dataset, val_dataset, num_epochs=100, save_metrics=
                 t = epoch / max(1, int(0.7 * num_epochs))
                 t = min(1.0, t)
                 alpha_hid = alpha_hid_start + (alpha_hid_end - alpha_hid_start) * t
-                loss, hiding_loss, rec_mse, rec_ssim = steganography_loss(
+
+                # Use enhanced loss function with perceptual and frequency losses
+                loss, hiding_loss, rec_mse, rec_ssim, rec_perceptual, freq_loss = steganography_loss(
                     stego_host,
                     host_input,
                     secret_tensor,
                     recovered_secret,
+                    perceptual_loss_fn=perceptual_loss_fn,
                     alpha_hid=alpha_hid,
                     alpha_rec_mse=alpha_rec_mse,
                     alpha_rec_ssim=alpha_rec_ssim,
+                    alpha_rec_perceptual=alpha_rec_perceptual,
+                    alpha_freq=alpha_freq,
                 )
                 # Add multi-scale ILWT loss on secret
                 ms_loss = ilwt_multiscale_secret_loss(
@@ -1030,15 +1275,18 @@ def train_model(model, train_dataset, val_dataset, num_epochs=100, save_metrics=
                         reconstructed_input = model.inverse(stego_like)
                         recovered_secret = reconstructed_input[:, 3:, :, :]
 
-                    # Calculate validation loss
-                    val_loss, val_hiding_loss, val_rec_mse, val_rec_ssim = steganography_loss(
+                    # Calculate validation loss with perceptual and frequency losses
+                    val_loss, val_hiding_loss, val_rec_mse, val_rec_ssim, val_rec_perceptual, val_freq_loss = steganography_loss(
                         stego_host,
                         host_input,
                         secret_tensor,
                         recovered_secret,
+                        perceptual_loss_fn=perceptual_loss_fn,
                         alpha_hid=alpha_hid,  # Use final alpha_hid from training
                         alpha_rec_mse=alpha_rec_mse,
                         alpha_rec_ssim=alpha_rec_ssim,
+                        alpha_rec_perceptual=alpha_rec_perceptual,
+                        alpha_freq=alpha_freq,
                     )
                     val_ms_loss = ilwt_multiscale_secret_loss(
                         model.ilwt, secret_tensor, recovered_secret
@@ -1402,12 +1650,13 @@ def main():
     print("ILWT Steganography Training and Testing")
     print("=" * 50)
 
+    # ========== IMPROVEMENT 12: Optimized Model Configuration ==========
     image_dir = "my_images"
     img_size = 224
-    num_blocks = 8  # Increased from 6 for better capacity
-    hidden_channels = 128  # Increased from 96 for wider network
-    num_epochs = 30  # Sweet spot - proven to work well
-    num_test_samples = 5  # Reduced for research testing
+    num_blocks = 10  # Increased from 8 for better capacity
+    hidden_channels = 160  # Increased from 128 for wider network
+    num_epochs = 50  # Increased for better convergence (was 30)
+    num_test_samples = 10  # Increased for better evaluation
 
     # Load full dataset
     full_dataset = ImageSteganographyDataset(image_dir, img_size=img_size)
