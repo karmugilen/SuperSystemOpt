@@ -19,35 +19,41 @@ import shutil
 import json
 
 
-# ========== IMPROVEMENT 1: Perceptual Loss using VGG19 ==========
+# ========== IMPROVEMENT 1: Perceptual Loss using VGG19 (Memory-Efficient for 4GB VRAM) ==========
 class PerceptualLoss(nn.Module):
-    """VGG19-based perceptual loss for better image quality"""
-    def __init__(self):
+    """VGG19-based perceptual loss for better image quality - OPTIMIZED FOR LOW VRAM"""
+    def __init__(self, use_cpu=False):
         super(PerceptualLoss, self).__init__()
         vgg = models.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features
+
+        # Use only first 2 layers to save memory (was 4 layers)
         self.slice1 = nn.Sequential()
         self.slice2 = nn.Sequential()
-        self.slice3 = nn.Sequential()
-        self.slice4 = nn.Sequential()
 
         for x in range(4):
             self.slice1.add_module(str(x), vgg[x])
         for x in range(4, 9):
             self.slice2.add_module(str(x), vgg[x])
-        for x in range(9, 18):
-            self.slice3.add_module(str(x), vgg[x])
-        for x in range(18, 27):
-            self.slice4.add_module(str(x), vgg[x])
 
         # Freeze VGG parameters
         for param in self.parameters():
             param.requires_grad = False
+
+        # Option to run on CPU to save GPU memory
+        self.use_cpu = use_cpu
+        if use_cpu:
+            self.cpu()
 
     def forward(self, x, y):
         """
         x, y: tensors in [-1, 1] range
         Returns: perceptual loss
         """
+        # Move to CPU if needed
+        if self.use_cpu:
+            x = x.cpu()
+            y = y.cpu()
+
         # Normalize from [-1, 1] to ImageNet stats
         mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(x.device)
         std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(x.device)
@@ -57,20 +63,14 @@ class PerceptualLoss(nn.Module):
         x = (x - mean) / std
         y = (y - mean) / std
 
+        # Only 2 levels to save memory
         x1 = self.slice1(x)
         y1 = self.slice1(y)
         x2 = self.slice2(x1)
         y2 = self.slice2(y1)
-        x3 = self.slice3(x2)
-        y3 = self.slice3(y2)
-        x4 = self.slice4(x3)
-        y4 = self.slice4(y3)
 
-        # Multi-level perceptual loss
-        loss = (F.l1_loss(x1, y1) +
-                F.l1_loss(x2, y2) +
-                F.l1_loss(x3, y3) +
-                F.l1_loss(x4, y4)) / 4.0
+        # Reduced perceptual loss (2 levels instead of 4)
+        loss = (F.l1_loss(x1, y1) + F.l1_loss(x2, y2)) / 2.0
         return loss
 
 
@@ -568,32 +568,23 @@ class StarINNWithILWT(nn.Module):
             raise ValueError(f"Unknown transform_type: {transform_type}")
         self.inn_channels = channels * 4
 
-        # ========== IMPROVEMENT 6: Enhanced Conditioning Network ==========
-        # More powerful multi-scale conditioning network
-        cond_ch = 64  # Increased from 16 for richer features
+        # ========== IMPROVEMENT 6: Enhanced Conditioning Network (OPTIMIZED FOR 4GB VRAM) ==========
+        # Lightweight conditioning network for low memory
+        cond_ch = 32  # Reduced from 64 to save memory
         self.cond_net = nn.Sequential(
             # Scale 1: Fine details
-            nn.Conv2d(3, 32, 3, padding=1),
+            nn.Conv2d(3, 16, 3, padding=1),
             nn.GELU(),
-            nn.GroupNorm(4, 32),
-            nn.Conv2d(32, 32, 3, padding=1),
+            nn.GroupNorm(2, 16),
+            nn.Conv2d(16, 32, 3, padding=1),
             nn.GELU(),
             nn.GroupNorm(4, 32),
 
-            # Scale 2: Mid-level features
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.GELU(),
-            nn.GroupNorm(8, 64),
-            nn.Conv2d(64, 64, 3, padding=1),
-            nn.GELU(),
-            nn.GroupNorm(8, 64),
-
-            # Add attention to conditioning
-            ChannelAttention(64, reduction=4),
-            SpatialAttention(kernel_size=7),
+            # Add lightweight attention
+            ChannelAttention(32, reduction=4),
 
             # Final projection
-            nn.Conv2d(64, cond_ch, 1),
+            nn.Conv2d(32, cond_ch, 1),
             nn.GELU(),
         )
 
@@ -1058,12 +1049,15 @@ def train_model(model, train_dataset, val_dataset, num_epochs=100, save_metrics=
     print(f"Using device: {device}")
     model = model.to(device)
 
-    # ========== IMPROVEMENT 9: Initialize Perceptual Loss ==========
-    perceptual_loss_fn = PerceptualLoss().to(device)
+    # ========== IMPROVEMENT 9: Initialize Perceptual Loss (4GB VRAM OPTIMIZED) ==========
+    # Run perceptual loss on CPU to save GPU memory
+    perceptual_loss_fn = PerceptualLoss(use_cpu=True)
     perceptual_loss_fn.eval()
+    print("Perceptual loss running on CPU to save GPU memory")
 
-    batch_size = 8  # Optimized for 16GB VRAM
-    learning_rate = 5e-5  # Increased for faster convergence (was 3e-5)
+    # ========== 4GB VRAM OPTIMIZATION: Minimal batch size with high accumulation ==========
+    batch_size = 1  # Minimum for 4GB VRAM (was 8)
+    learning_rate = 5e-5  # Keep same learning rate
     warmup_epochs = 3  # Warmup for stable training
 
     # ========== IMPROVEMENT 10: Optimized Loss Weights ==========
@@ -1072,26 +1066,26 @@ def train_model(model, train_dataset, val_dataset, num_epochs=100, save_metrics=
     alpha_hid_end = 20.0  # Moderate hiding priority (was 24.0)
     alpha_rec_mse = 2.5  # Balanced secret recovery (was 3.0)
     alpha_rec_ssim = 6.0  # Strong perceptual quality (was 5.0)
-    alpha_rec_perceptual = 1.0  # Perceptual loss weight
+    alpha_rec_perceptual = 0.5  # Reduced perceptual weight (was 1.0) for stability with CPU
     alpha_freq = 0.5  # Frequency domain loss weight
 
-    # GPU-optimized DataLoaders for 16GB VRAM
+    # 4GB VRAM-optimized DataLoaders
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=8,  # Increased for faster data loading
+        num_workers=2,  # Reduced for low memory (was 8)
         pin_memory=True,  # Faster GPU transfer
-        prefetch_factor=4,  # Increased prefetch for better pipelining
-        persistent_workers=True  # Keep workers alive
+        prefetch_factor=2,  # Reduced prefetch (was 4)
+        persistent_workers=False  # Don't keep workers alive to save memory
     )
     val_dataloader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,  # Increased for validation
+        num_workers=2,  # Reduced for validation (was 4)
         pin_memory=True,
-        prefetch_factor=4  # Increased prefetch
+        prefetch_factor=2  # Reduced prefetch (was 4)
     )
     
     # ========== IMPROVEMENT 11: Better Optimizer and Scheduler ==========
@@ -1129,15 +1123,16 @@ def train_model(model, train_dataset, val_dataset, num_epochs=100, save_metrics=
 
     scheduler = CombinedScheduler(warmup_scheduler, cosine_scheduler, warmup_epochs)
 
-    # Mixed precision ENABLED for 2x speedup with 16GB VRAM
+    # Mixed precision ENABLED for memory efficiency
     scaler = torch.cuda.amp.GradScaler(enabled=True)
-    use_amp = True  # Enabled for faster training
+    use_amp = True  # Critical for 4GB VRAM
 
-    # Gradient accumulation for effective larger batch sizes
-    accumulation_steps = 4  # Effective batch size = 8 * 4 = 32
+    # ========== 4GB VRAM: High gradient accumulation ==========
+    accumulation_steps = 32  # Effective batch size = 1 * 32 = 32 (same as before)
 
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"16GB VRAM optimizations: batch_size={batch_size}, accumulation_steps={accumulation_steps}, effective_batch_size={batch_size*accumulation_steps}, num_workers=8, AMP={use_amp}")
+    print(f"4GB VRAM optimizations: batch_size={batch_size}, accumulation_steps={accumulation_steps}, effective_batch_size={batch_size*accumulation_steps}, num_workers=2, AMP={use_amp}")
+    print("WARNING: Training will be slower due to small batch size, but memory usage is minimized for 4GB VRAM")
     
     # Track metrics over epochs for research
     metrics_history = {
@@ -1237,6 +1232,10 @@ def train_model(model, train_dataset, val_dataset, num_epochs=100, save_metrics=
                 scaler.update()
                 optimizer.zero_grad()
 
+                # ========== 4GB VRAM: Clear cache after optimizer step ==========
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
             epoch_train_loss += loss.item() * accumulation_steps  # Unscale for logging
 
         # Calculate average training metrics
@@ -1305,7 +1304,15 @@ def train_model(model, train_dataset, val_dataset, num_epochs=100, save_metrics=
                     val_recovery_psnrs.append(val_recovery_psnr.item())
                     val_recovery_ssims.append(val_rec_ssim_val)
                     val_bit_accs.append(val_bit_acc)
-            
+
+                    # ========== 4GB VRAM: Clear cache periodically during validation ==========
+                    if torch.cuda.is_available() and val_batch_idx % 10 == 0:
+                        torch.cuda.empty_cache()
+
+            # ========== 4GB VRAM: Clear cache after validation ==========
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             if val_losses:  # Check if we have validation data
                 avg_val_loss = np.mean(val_losses)
                 avg_val_hiding_psnr = np.mean(val_hiding_psnrs)
@@ -1650,13 +1657,22 @@ def main():
     print("ILWT Steganography Training and Testing")
     print("=" * 50)
 
-    # ========== IMPROVEMENT 12: Optimized Model Configuration ==========
+    # ========== 4GB VRAM CONFIGURATION: Reduced model size ==========
     image_dir = "my_images"
-    img_size = 224
-    num_blocks = 10  # Increased from 8 for better capacity
-    hidden_channels = 160  # Increased from 128 for wider network
-    num_epochs = 50  # Increased for better convergence (was 30)
-    num_test_samples = 10  # Increased for better evaluation
+    img_size = 224  # Keep image size
+    num_blocks = 6  # Reduced from 10 to fit in 4GB VRAM
+    hidden_channels = 80  # Reduced from 160 to fit in 4GB VRAM
+    num_epochs = 40  # Reduced from 50 (training is slower with batch_size=1)
+    num_test_samples = 5  # Reduced for faster evaluation
+
+    print("=" * 70)
+    print("4GB VRAM OPTIMIZED CONFIGURATION")
+    print("=" * 70)
+    print(f"Model size: {num_blocks} blocks × {hidden_channels} channels")
+    print(f"Training: {num_epochs} epochs with batch_size=1, accumulation=32")
+    print(f"Expected VRAM usage: ~3-3.5 GB (safe for 4GB GPUs)")
+    print("Note: Training will be ~3-4x slower than 16GB VRAM version")
+    print("=" * 70)
 
     # Load full dataset
     full_dataset = ImageSteganographyDataset(image_dir, img_size=img_size)
